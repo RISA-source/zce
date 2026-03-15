@@ -34,7 +34,7 @@ Example program:
 """
 
 import re
-from zce_core_v2 import Asm
+from vm.zce_vm import Asm
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LEXER

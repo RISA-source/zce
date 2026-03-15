@@ -14,7 +14,8 @@ All passes are O(n) or O(n²) in program length.
 None require execution. All results are exact, not approximate.
 """
 
-from zce_core import BS, Exec, Asm, AsmOpt, EXT, run_stream, TOK, OP
+from vm.zce_vm import BS, Exec, Asm, AsmOpt, EXT, run_stream, TOK, OP
+# Note: in v2, AsmOpt = Asm (alias). Extended ops now at tok8-16 (shifted +2 for CALL/RET).
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -82,9 +83,11 @@ def decode_program(data):
     rules = {
         1: dict(ok=1, na=2, at=[P, V],    act=0, ap=1,  name='SET'),
         2: dict(ok=1, na=3, at=[P, P, P], act=0, ap=2,  name='ADD'),
-        3: dict(ok=1, na=2, at=[P, 2],    act=1, ap=0,  name='JIF'),
-        4: dict(ok=1, na=1, at=[2],       act=2, ap=0,  name='JMP'),
+        3: dict(ok=1, na=2, at=[P, P],    act=1, ap=0,  name='JIF'),   # v2: Elias offset
+        4: dict(ok=1, na=1, at=[P],       act=2, ap=0,  name='JMP'),   # v2: Elias offset
         5: dict(ok=1, na=0, at=[],        act=3, ap=0,  name='DEF'),
+        6: dict(ok=1, na=1, at=[P],       act=4, ap=0,  name='CALL'),  # v2 new
+        7: dict(ok=1, na=0, at=[],        act=5, ap=0,  name='RET'),   # v2 new
     }
 
     # map extended op codes to names
@@ -113,7 +116,7 @@ def decode_program(data):
             at    = [elias() for _ in range(na)]
             act   = elias()
             ap    = elias() if act == 0 else 0
-            bad   = tgt <= 0 or tgt >= 64 or tgt in {3, 4, 5}
+            bad   = tgt <= 0 or tgt >= 64 or tgt in {3, 4, 5, 6, 7}
             op_nm = ext_names.get(ap, f'EXT{ap}') if act == 0 else f'ACT{act}'
             if not bad:
                 rules[tgt] = dict(ok=1, na=na, at=at, act=act, ap=ap,
@@ -158,9 +161,13 @@ def decode_program(data):
                 elif ap == 11: # STOR: slots[slots[dst]] ← slots[a]
                     reads.add(args[0]); reads.add(args[1])
 
-        elif act == 1:  # JIF: reads cond slot, jump offset is literal
+        elif act == 1:  # JIF: reads cond slot, jump offset is Elias
             reads.add(args[0])
         elif act == 2:  # JMP: no slot reads/writes
+            pass
+        elif act == 4:  # CALL: no slot reads/writes (pure control)
+            pass
+        elif act == 5:  # RET: no slot reads/writes (pure control)
             pass
 
         instrs.append(Instr(ipos, tok, depth, op_name, args, reads, writes))

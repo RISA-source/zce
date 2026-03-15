@@ -10,7 +10,7 @@ The M field enables this: depth transitions mark instruction boundaries
 so the decoder knows when each instruction ends without a lookup table.
 """
 
-from zce_core_v2 import EXT
+from vm.zce_vm import EXT
 
 
 class ByteStream:
