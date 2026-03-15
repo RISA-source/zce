@@ -1,7 +1,7 @@
 # ZCE — Zero-Count Encoding VM
 
 **Author:** Rishi Saraff  
-**Status:** 118 tests passing. C header compiles and agrees with Python reference VM.
+**Status:** 149 tests passing across 33 suites. C header compiles and agrees with Python reference VM.
 
 ---
 
@@ -148,20 +148,20 @@ zce/
   vm/
     zce_core.h       C single-header VM (buffered + seekable modes)
     zce_vm.py        Python reference VM (used by compiler + analysis)
-    zce_stream.py    Streaming executor + predict_ram()
+    zce_stream.py    Streaming executor + predict_ram() — supports CALL/RET
   compiler/
     zce_compiler.py  ZCE-lang → binary compiler
   analysis/
-    zce_analysis.py  Six static analysis passes
+    zce_analysis.py  Five static analysis passes
   tests/
-    test_all.py      118 tests: VM, compiler, analysis, C/Python agreement
+    test_all.py      149 tests: VM, compiler, analysis, streaming, C/Python agreement, error conditions
 ```
 
 ---
 
 ## Static Analysis
 
-All passes run on the binary before execution:
+All five passes run on the binary before execution:
 
 ```
 Pass 0: DECODE    O(n)     build instruction list from binary
@@ -295,16 +295,25 @@ Python 3.8+. No dependencies beyond standard library.
 ## Measured Numbers
 
 ```
-Test suite:                  118/118 passing
-Compiler:                    64 tests (all ops, edge cases)
-Analysis:                    25 tests (tier, waves, depth, SIMD, RAM)
-VM core:                     29 tests (all instructions, loops, edge cases)
+Test suite:                  149/149 passing, 33 suites
+  VM core:                   all 11 instructions, loops, edge cases
+  Compiler:                  full language, nested calls, mutual calls, iterative fib
+  Analysis:                  tier safety, waves, depth bound, SIMD, RAM prediction
+  Streaming:                 loops, CALL/RET, compiled programs agree with reference VM
+  C/Python agreement:        7 compiler-produced programs run through both VMs
+  Error conditions:          compiler errors, VM bad input
 
 Python VM throughput:        ~200K instructions/sec (reference, not C speed)
 Compile time:                ~0.4ms per program
-Analysis time:               ~1ms per program
+Analysis time:               ~0.5ms per program
+predict_ram:                 ~0.3ms per program
 Parallel speedup (measured): up to 40× on independent programs
-C header:                    compiles clean, SET(0,42) agrees with Python VM
+C header:                    compiles clean, agrees with Python VM
+
+Binary sizes (compiler output):
+  SET(0,42):                 43 bytes
+  factorial(10):             139 bytes
+  fib(15):                   141 bytes
 
 VM footprint (C):
   Buffered mode:             ~1664B
@@ -328,9 +337,9 @@ VM footprint (C):
 ## What Comes Next
 
 1. **Hardware demo** — ATtiny85 or STM32F030, pre-deployment bounds verified live before flash
-2. **Compiler fix** — nested call expression arg slot isolation
-3. **FORK/JOIN in C** — ESP32 dual-core, wave schedule as the safety proof
-4. **SIMD emission** — Cortex-M4 NEON, measure actual vs theoretical speedup on silicon
+2. **FORK/JOIN in C** — ESP32 dual-core, wave schedule as the safety proof
+3. **SIMD emission** — Cortex-M4 NEON, measure actual vs theoretical speedup on silicon
+4. **Compiler: same-function-twice in arg list** — `f(g(x), g(x))` shares arg slots; sequential workaround documented in BUILDLOG
 
 ---
 
