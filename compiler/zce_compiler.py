@@ -336,13 +336,22 @@ class Compiler:
 
     # ── Entry point ───────────────────────────────────────────────────────────
     def compile(self, ast):
-        # First pass: register all functions
-        for node in ast.body:
-            if node.kind == 'FunDef':
-                lbl = f'__fun_{node.name}'
-                self.funs[node.name] = (lbl, node.params)
+        # First pass: register all functions and assign each a unique
+        # non-overlapping tmp region. This ensures that when fn A calls fn B,
+        # B's internal tmps never overwrite live tmp values in A.
+        #
+        # Layout:
+        #   top-level tmps: TMP_BASE .. TMP_BASE+19  (slots 230-249)
+        #   fn 0 tmps:      TMP_BASE+20 .. TMP_BASE+39 (slots 250-269)
+        #   fn 1 tmps:      TMP_BASE+40 .. TMP_BASE+59 (slots 270-289)
+        #   ... etc. (20 tmp slots per function, ample for any expression)
+        fn_defs = [n for n in ast.body if n.kind == 'FunDef']
+        for idx, node in enumerate(fn_defs):
+            lbl = f'__fun_{node.name}'
+            tmp_base = self.TMP_BASE + 20 * (idx + 1)
+            self.funs[node.name] = (lbl, node.params, tmp_base)
 
-        # Second pass: emit top-level statements (skip fundefs — emitted after)
+        # Second pass: emit top-level statements (skip fundefs)
         end_lbl = self.fresh_label('end')
         has_stmts = any(n.kind != 'FunDef' for n in ast.body)
         if has_stmts:
@@ -421,13 +430,13 @@ class Compiler:
         self.free_tmp(cond_slot)
 
     def emit_fundef(self, node):
-        lbl, params = self.funs[node.name]
+        lbl, params, fn_tmp_base = self.funs[node.name]
         self.asm.label(lbl)
-        # Save caller's env, create new env for function
+        # Save caller state, switch to this function's unique tmp region.
         saved_env = self.env
         saved_tmp = self._tmp
         self.env = Env(base_slot=100)  # function vars start at slot 100
-        self._tmp = self.TMP_BASE + 20  # fn temps at 250+, never overlap caller temps (230-249)
+        self._tmp = fn_tmp_base        # unique non-overlapping tmp region
         self.env.push()
         # Map parameters: caller passes args in slots 240+
         for i, p in enumerate(params):
@@ -446,7 +455,7 @@ class Compiler:
         """Emit a function call. Result goes into dst_slot."""
         if node.name not in self.funs:
             raise NameError(f'Unknown function: {node.name!r}')
-        lbl, params = self.funs[node.name]
+        lbl, params, _ = self.funs[node.name]
         if len(node.args) != len(params):
             raise TypeError(f'{node.name}: expected {len(params)} args, got {len(node.args)}')
         # Evaluate args into slots 240+
@@ -532,5 +541,3 @@ def compile_source(src):
     ast  = parse(src)
     comp = Compiler()
     return comp.compile(ast)
-
-

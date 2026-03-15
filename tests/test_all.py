@@ -669,18 +669,28 @@ let result = factorial(6);
 """)
 check("recursive-style function: factorial(6)=720", r, 720)
 
-# Known compiler limitation: nested call expressions (f(g(x))) clobber
-# shared arg slots (240+). Sequential calls work correctly.
-binary_ns = compile_source("""
+r, ok = cc("""
 fun square(x) { return x * x; }
-let a = square(3);
-let b = square(4);
-let x = a + b;
+fun sum_squares(a, b) { return square(a) + square(b); }
+let x = sum_squares(3, 4);
 """)
-vm_ns, _ = run_stream(binary_ns)
-check("function calls sequential: square(3)+square(4)=25", vm_ns.slot(2), 25)
-check("function calls: square(3)=9", vm_ns.slot(0), 9)
-check("function calls: square(4)=16", vm_ns.slot(1), 16)
+check("nested function calls in expression: sum_squares(3,4)=25", r, 25)
+
+binary_cube = compile_source("""
+fun square(x) { return x * x; }
+fun cube(x) { return x * square(x); }
+let x = cube(3);
+""")
+check("deeply nested call: cube(3)=27", run_stream(binary_cube)[0].slot(0), 27)
+
+binary_deep = compile_source("""
+fun inc(x) { return x + 1; }
+fun double(x) { return x * 2; }
+fun f(a, b) { return double(inc(a)) + double(inc(b)); }
+let x = f(2, 3);
+""")
+# f(2,3) = double(inc(2)) + double(inc(3)) = 6 + 8 = 14
+check("three-level nested calls: f(2,3)=14", run_stream(binary_deep)[0].slot(0), 14)
 
 r, ok = cc("""
 fun zero() { return 0; }

@@ -228,19 +228,22 @@ let result = name(3, 4);
 &&  ||  !             logic
 ```
 
-### Known compiler limitations
+### Function calls
 
-- Nested call expressions (`f(g(x))` as argument to another call) clobber shared argument slots (240+). Use sequential calls instead:
+Nested call expressions work correctly at any depth:
 
 ```
-// Works correctly
-let a = square(3);
-let b = square(4);
-let x = a + b;
+fun square(x) { return x * x; }
+fun sum_squares(a, b) { return square(a) + square(b); }
+let x = sum_squares(3, 4);   // 25 ✓
 
-// May give wrong results (arg slot clobbering)
-let x = sum_squares(square(3), square(4));
+fun inc(x) { return x + 1; }
+fun double(x) { return x * 2; }
+fun f(a, b) { return double(inc(a)) + double(inc(b)); }
+let x = f(2, 3);   // 14 ✓
 ```
+
+Each function is assigned a unique, non-overlapping tmp slot region at compile time so callee tmps never overwrite live caller values.
 
 ---
 
