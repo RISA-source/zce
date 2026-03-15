@@ -1,5 +1,5 @@
 """
-ZCE Static Analysis Stack — six passes over the bit stream before execution.
+ZCE Static Analysis Stack — five passes over the bit stream before execution.
 Author: Rishi Saraff
 
 Pass 0: DECODE       — build instruction list from binary
@@ -8,7 +8,6 @@ Pass 2: DEPS         — build dependency graph (reads/writes per instruction)
 Pass 3: WAVES        — topological wave schedule for parallel execution
 Pass 4: DEPTH        — static step-count upper bound from M field + tier-1 values
 Pass 5: SIMD         — identify groups of 4 independent same-op instructions
-Pass 6: P_TIER       — computable Solomonoff-like prior over tier-safe programs
 
 All passes are O(n) or O(n²) in program length.
 None require execution. All results are exact, not approximate.
@@ -178,10 +177,6 @@ def decode_program(data):
 # ─────────────────────────────────────────────────────────────────────────────
 # Pass 1: Tier Classification — prove termination
 # ─────────────────────────────────────────────────────────────────────────────
-
-class TierViolation(Exception):
-    pass
-
 
 def classify_tiers(instrs):
     """
@@ -538,119 +533,27 @@ def print_analysis(r, verbose=False):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pass 6: P_tier — computable Solomonoff-like prior
+# P_tier prior — REMOVED
+#
+# What it did: enumerated tier-safe ZCE programs up to a bit-length bound,
+# weighted each by 2^(-length), and computed P_tier(target) as the normalised
+# sum of weights for programs producing that output. Intended for anomaly
+# detection on embedded sensor streams: a spike in description length signals
+# an anomaly.
+#
+# Why it was interesting: P_tier is a computable approximation to Solomonoff
+# induction restricted to the tier-safe class. Because tier-safe programs
+# always terminate, the prior is well-defined and computable — unlike the full
+# Solomonoff prior which requires solving the halting problem.
+#
+# Why removed:
+#   1. Enumeration covered only 3 hardcoded program shapes (SET literals,
+#      simple arithmetic, counting loops) — not exhaustive within any bit-length
+#      bound, so the prior mass was not a correct probability.
+#   2. Nothing in the deployed system calls it. Hardware is the goal.
+#   3. 110 lines of uncalled, incomplete code is dead weight.
+#
+# To restore: git history has the full implementation. A correct P_tier would
+# enumerate all tier-safe programs by exact bit length using the self-delimiting
+# format's counting theorem, not by structural shape.
 # ─────────────────────────────────────────────────────────────────────────────
-
-def enumerate_tier_safe_programs(max_bits, target_output=None,
-                                 max_programs=10000, time_limit_ms=5000):
-    """
-    Enumerate tier-safe ZCE programs up to max_bits in length.
-    All enumerated programs are guaranteed to terminate (tier-safe).
-
-    If target_output is given (int), returns programs that produce
-    that value in slot 0.
-
-    Returns (programs, prior_mass) where:
-      programs   = list of (binary, slot0_value, length_bits)
-      prior_mass = sum of 2^(-len) for all consistent programs
-                   this is P_tier(target_output)
-    """
-    import time
-    start = time.time()
-
-    # We enumerate by building small programs using the assembler
-    # Strategy: generate programs of the form SET(0, v) and simple arithmetic
-    # then check tier-safety and collect those matching target
-
-    candidates = []
-    prior_mass = 0.0
-
-    # Level 1: pure SET programs — SET(0, v) for v in range
-    # These are trivially tier-safe (no JIF at all)
-    max_v = min(255, 2**(max_bits // 8))
-    for v in range(max_v):
-        a = AsmOpt()
-        a.SET(0, v)
-        binary = a.build()
-        nbits = len(binary) * 8
-        if nbits > max_bits:
-            break
-        safe, _, _, _ = is_tier_safe(binary)
-        if safe:
-            if target_output is None or v == target_output:
-                candidates.append((binary, v, nbits))
-                prior_mass += 2.0 ** (-nbits)
-        if len(candidates) >= max_programs:
-            break
-
-    # Level 2: simple arithmetic programs — SET + ADD/SUB/MUL
-    if len(candidates) < max_programs:
-        for a_val in range(16):
-            for b_val in range(16):
-                for op_name in ('ADD', 'SUB', 'MUL'):
-                    elapsed = (time.time() - start) * 1000
-                    if elapsed > time_limit_ms: break
-                    a = AsmOpt(); a.std()
-                    a.SET(1, a_val); a.SET(2, b_val)
-                    if op_name == 'ADD':
-                        a.ADD(0, 1, 2)
-                        result = a_val + b_val
-                    elif op_name == 'SUB':
-                        a.SUB(0, 1, 2)
-                        result = a_val - b_val
-                    else:
-                        a.MUL(0, 1, 2)
-                        result = a_val * b_val
-                    binary = a.build()
-                    nbits = len(binary) * 8
-                    if nbits > max_bits: continue
-                    safe, _, _, _ = is_tier_safe(binary)
-                    if safe:
-                        if target_output is None or result == target_output:
-                            candidates.append((binary, result, nbits))
-                            prior_mass += 2.0 ** (-nbits)
-                    if len(candidates) >= max_programs: break
-
-    # Level 3: tier-safe loop programs — loop with decreasing tier-1 counter
-    if len(candidates) < max_programs:
-        for n in range(1, 20):
-            elapsed = (time.time() - start) * 1000
-            if elapsed > time_limit_ms: break
-            # Build: sum 1..n  (classic tier-safe loop)
-            a = AsmOpt(); a.std()
-            a.SET(0, 0)   # accumulator (tier-0)
-            a.SET(10, n)  # counter (tier-1, decremented)
-            a.SET(2, 1)   # constant 1
-            a.label('loop')
-            a.ADD(0, 0, 10)   # acc += counter
-            a.SUB(10, 10, 2)  # counter -= 1  (tier-1 decremented)
-            a.JIF(10, 'done') # if counter == 0 exit
-            a.JMP('loop')
-            a.label('done')
-            binary = a.build()
-            nbits = len(binary) * 8
-            if nbits > max_bits: continue
-            safe, _, _, _ = is_tier_safe(binary)
-            result = n * (n + 1) // 2
-            if safe:
-                if target_output is None or result == target_output:
-                    candidates.append((binary, result, nbits))
-                    prior_mass += 2.0 ** (-nbits)
-            if len(candidates) >= max_programs: break
-
-    return candidates, prior_mass
-
-
-def ptier_predict(target_output, max_bits=400):
-    """
-    Compute P_tier(target_output) — the computable Solomonoff-like
-    prior probability of producing target_output in slot 0.
-
-    Returns (probability, n_programs_checked, n_consistent).
-    """
-    programs, mass       = enumerate_tier_safe_programs(
-        max_bits, target_output=target_output)
-    all_programs, all_mass = enumerate_tier_safe_programs(max_bits)
-    total_mass = all_mass if all_mass > 0 else 1.0
-    prob = mass / total_mass if total_mass > 0 else 0.0
-    return prob, len(all_programs), len(programs)

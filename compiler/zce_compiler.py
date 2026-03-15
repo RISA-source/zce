@@ -306,7 +306,6 @@ class Compiler:
     """Compiles ZCE-lang AST to ZCE Asm."""
 
     SCRATCH_BASE = 200  # scratch slots start here (above user vars)
-    BOOL_SLOT    = 220  # slot for boolean temporaries
     TMP_BASE     = 230  # temp slots for expressions
 
     def __init__(self):
@@ -336,22 +335,16 @@ class Compiler:
 
     # ── Entry point ───────────────────────────────────────────────────────────
     def compile(self, ast):
-        # First pass: register all functions and assign each a unique
-        # non-overlapping tmp region. This ensures that when fn A calls fn B,
-        # B's internal tmps never overwrite live tmp values in A.
-        #
-        # Layout:
-        #   top-level tmps: TMP_BASE .. TMP_BASE+19  (slots 230-249)
-        #   fn 0 tmps:      TMP_BASE+20 .. TMP_BASE+39 (slots 250-269)
-        #   fn 1 tmps:      TMP_BASE+40 .. TMP_BASE+59 (slots 270-289)
-        #   ... etc. (20 tmp slots per function, ample for any expression)
+        # First pass: register all functions, assigning each a unique tmp region.
+        # Layout: top-level tmps 230-249, fn0 tmps 250-269, fn1 tmps 270-289, ...
+        # This ensures callee tmps never overlap with live caller tmp values.
         fn_defs = [n for n in ast.body if n.kind == 'FunDef']
         for idx, node in enumerate(fn_defs):
             lbl = f'__fun_{node.name}'
             tmp_base = self.TMP_BASE + 20 * (idx + 1)
             self.funs[node.name] = (lbl, node.params, tmp_base)
 
-        # Second pass: emit top-level statements (skip fundefs)
+        # Second pass: emit top-level statements (skip fundefs — emitted after)
         end_lbl = self.fresh_label('end')
         has_stmts = any(n.kind != 'FunDef' for n in ast.body)
         if has_stmts:
@@ -432,11 +425,11 @@ class Compiler:
     def emit_fundef(self, node):
         lbl, params, fn_tmp_base = self.funs[node.name]
         self.asm.label(lbl)
-        # Save caller state, switch to this function's unique tmp region.
+        # Use this function's statically assigned tmp region (no overlap with any caller).
         saved_env = self.env
         saved_tmp = self._tmp
         self.env = Env(base_slot=100)  # function vars start at slot 100
-        self._tmp = fn_tmp_base        # unique non-overlapping tmp region
+        self._tmp = fn_tmp_base
         self.env.push()
         # Map parameters: caller passes args in slots 240+
         for i, p in enumerate(params):

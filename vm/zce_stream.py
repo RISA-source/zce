@@ -1,20 +1,19 @@
 """
-ZCE Streaming Executor — correct implementation.
+ZCE Streaming Executor
 Author: Rishi Saraff
 
 RAM model:
-  Current executor:   O(program_bits) — loads everything as Python ints
-  Streaming executor: O(slot_array + max_loop_body) — independent of program size
+  Reference executor:  O(program_bits) — loads everything as Python ints
+  Streaming executor:  O(slots + max_loop_body) — independent of program size
 
-The M field enables this: depth transitions mark instruction boundaries
-so the decoder knows when each instruction ends without a lookup table.
+Supports all v2 instructions including CALL/RET.
 """
 
 from vm.zce_vm import EXT
 
 
 class ByteStream:
-    """O(1) RAM bit reader. Holds only current byte + position."""
+    """O(1) RAM bit reader."""
     def __init__(self, data):
         self._data = data
         self._byte_pos = 0; self._bit_pos = 0; self._abs_bit = 0
@@ -67,8 +66,9 @@ class StreamExec:
     """
     Streaming ZCE executor.
     RAM = O(slots + max_loop_body), independent of program size.
+    Supports all v2 instructions including CALL/RET.
     """
-    MAX_SLOTS = 256
+    MAX_SLOTS = 512   # must exceed compiler's highest tmp slot (230 + 20*(n_fns+1))
     MAX_STEPS = 50_000_000
 
     def __init__(self, ext=None):
@@ -84,6 +84,7 @@ class StreamExec:
         self._loop_buffers = {}
         self._reader = None
         self._gs = 0; self._ge = 0; self._data = None
+        self._call_stack = []
 
         P, V = 0, 1
         self.rules[1] = dict(ok=1, na=2, at=[P,V],   act=0, ap=1)
@@ -91,6 +92,8 @@ class StreamExec:
         self.rules[3] = dict(ok=1, na=2, at=[P,P],   act=1, ap=0)
         self.rules[4] = dict(ok=1, na=1, at=[P],     act=2, ap=0)
         self.rules[5] = dict(ok=1, na=0, at=[],      act=3, ap=0)
+        self.rules[6] = dict(ok=1, na=1, at=[P],     act=4, ap=0)  # CALL
+        self.rules[7] = dict(ok=1, na=0, at=[],      act=5, ap=0)  # RET
 
     def _bit(self):
         b = self._reader.read_bit()
@@ -124,7 +127,7 @@ class StreamExec:
 
     def _define(self):
         tgt = self._elias()
-        bad = tgt <= 0 or tgt >= 64 or tgt in {3, 4, 5}
+        bad = tgt <= 0 or tgt >= 64 or tgt in {3, 4, 5, 6, 7}
         na  = self._elias() + 1
         at  = [self._elias() for _ in range(na)]
         act = self._elias()
@@ -137,12 +140,31 @@ class StreamExec:
         if 0 <= i < self.MAX_SLOTS: self.slots[i] = v
 
     def _exec_one(self):
-        """Execute one instruction from current reader. Returns 'continue','jump_fwd','jump_back','end','error'."""
+        """Execute one instruction. Returns (action, target)."""
         pos = self._reader.tell()
         tok, depth = self._token()
         if self.err: return 'error', 0
         if tok == 0: return 'continue', 0
         if tok == 5: self._define(); return 'continue', 0
+
+        # CALL — push return address, jump to subroutine
+        if tok == 6:
+            off = self._elias()
+            if self.err: return 'error', 0
+            if len(self._call_stack) >= 64:
+                self.err = 'call_stack_overflow'; return 'error', 0
+            self._call_stack.append(self._reader.tell())
+            target = self._gs + off
+            self.steps += 1
+            return 'jump_fwd', target
+
+        # RET — pop return address
+        if tok == 7:
+            if not self._call_stack:
+                self.err = 'ret_without_call'; return 'error', 0
+            ret_addr = self._call_stack.pop()
+            self.steps += 1
+            return 'jump_fwd', ret_addr
 
         if tok not in self.rules or not self.rules[tok]['ok']:
             self.err = f"undef_tok_{tok}"; return 'error', 0
@@ -180,6 +202,7 @@ class StreamExec:
     def run(self, data):
         self._data = data
         self._reader = ByteStream(data)
+        self._call_stack = []
         gb = self._elias()
         if self.err: return False
         self._gs = self._reader.tell()
@@ -188,7 +211,7 @@ class StreamExec:
         return not bool(self.err)
 
     def _run_main(self):
-        """Run from main stream until grammar end."""
+        """Run main stream until program end."""
         while not self.err and self.steps < self.MAX_STEPS:
             if self._reader.tell() >= self._ge: break
             action, target = self._exec_one()
@@ -199,23 +222,31 @@ class StreamExec:
             elif action == 'jump_back':
                 self._run_loop(target)
 
+    def _run_until_return(self):
+        """Run on main stream until call stack depth drops below entry level."""
+        depth_at_entry = len(self._call_stack)
+        while not self.err and self.steps < self.MAX_STEPS:
+            if self._reader.tell() >= self._ge: break
+            action, target = self._exec_one()
+            if action == 'error': break
+            elif action == 'jump_fwd':
+                if target >= self._ge: break
+                self._reader.seek(target)
+            elif action == 'jump_back':
+                self._run_loop(target)
+            if len(self._call_stack) < depth_at_entry:
+                break
+
     def _run_loop(self, loop_start_abs):
         """
         Execute a loop whose body starts at loop_start_abs.
-        Buffer the body on first encounter, re-use buffer on subsequent iterations.
+        Buffer the body on first encounter; re-use on subsequent iterations.
+        CALL instructions inside the loop body are dispatched to _run_until_return
+        on the main stream, then execution resumes in the buffer.
         """
-        # The loop body ends at the current reader position (after reading the jump instruction).
-        # But actually: we need to capture from loop_start_abs to the position
-        # BEFORE the backwards jump instruction. We detect this by running the body
-        # and watching for the exit condition.
-        # 
-        # Simpler correct approach: buffer on first entry by reading forward,
-        # then execute from buffer with jump handling.
-
-        loop_end_abs = self._reader.tell()  # position after the JMP that sent us here
+        loop_end_abs = self._reader.tell()
 
         if loop_start_abs not in self._loop_buffers:
-            # Capture body = [loop_start_abs, loop_end_abs)
             body_len = loop_end_abs - loop_start_abs
             tmp = ByteStream(self._data)
             tmp.seek(loop_start_abs)
@@ -227,7 +258,6 @@ class StreamExec:
         buf_bits = self._loop_buffers[loop_start_abs]
         buf_len  = len(buf_bits)
 
-        # Execute loop iterations
         while not self.err and self.steps < self.MAX_STEPS:
             self.loop_iterations += 1
             buf = BitBuffer(buf_bits)
@@ -235,52 +265,55 @@ class StreamExec:
             exited = False
 
             while not self.err and self.steps < self.MAX_STEPS:
-                pos_in_buf = buf.tell()
-                if pos_in_buf >= buf_len:
-                    # Ran off end of buffer without a jump — restart loop
-                    break
+                if buf.tell() >= buf_len:
+                    break  # ran off end — restart loop
 
                 action, target = self._exec_one()
                 if action == 'error': return
 
                 elif action == 'jump_fwd':
-                    # Forward jump — may exit loop or jump within
                     target_offset = target - loop_start_abs
                     if target_offset >= buf_len:
-                        # Exits loop — switch back to main stream
-                        self._reader = ByteStream(self._data)
-                        if target < self._ge:
+                        # Forward jump past buffer end.
+                        # If call stack grew, this is a CALL to a subroutine
+                        # outside the loop — run it on the main stream then resume.
+                        if self._call_stack and self._call_stack[-1] > loop_start_abs:
+                            resume_abs = self._call_stack[-1]
+                            resume_offset = resume_abs - loop_start_abs
+                            self._reader = ByteStream(self._data)
                             self._reader.seek(target)
+                            self._run_until_return()
+                            if self.err: return
+                            buf.seek(resume_offset)
+                            self._reader = buf
                         else:
-                            self._reader.seek(self._ge)
-                        exited = True
-                        break
+                            # Genuine loop exit
+                            self._reader = ByteStream(self._data)
+                            tgt = target if target < self._ge else self._ge
+                            self._reader.seek(tgt)
+                            exited = True
+                            break
                     else:
                         buf.seek(target_offset)
 
                 elif action == 'jump_back':
                     target_offset = target - loop_start_abs
                     if target_offset <= 0:
-                        # Restart from beginning of buffer
-                        break
+                        break  # restart from beginning
                     else:
                         buf.seek(target_offset)
 
-                # 'continue' — just keep reading
-
             if exited:
-                return  # back to _run_main with reader pointing past loop
+                return
 
-            # Loop restarted (ran off end or jumped back to start)
-            self._reader = ByteStream(self._data)  # restore temporarily
-            # Will re-enter via _run_main detecting backwards jump... 
-            # Actually: just restart the buffer loop directly
+            # Loop restarted — switch reader back temporarily then continue
+            self._reader = ByteStream(self._data)
             continue
 
     def slot(self, i): return self._get(i)
 
     def ram_report(self):
-        slot_ram  = self.MAX_SLOTS * 8
+        slot_ram  = self.MAX_SLOTS * 4  # int32 = 4 bytes
         rules_ram = len(self.rules) * 64
         loop_ram  = sum(len(b) for b in self._loop_buffers.values()) // 8 + 1
         misc_ram  = 256
@@ -298,7 +331,7 @@ class StreamExec:
 
 
 def predict_ram(data):
-    """Static analysis: predict RAM needed by scanning M field and jump targets."""
+    """Static RAM prediction: scan bit stream, find largest loop body."""
     stream = ByteStream(data)
 
     def read_elias():
@@ -311,7 +344,8 @@ def predict_ram(data):
     gb = read_elias()
     gs = stream.tell(); ge = gs + gb
     max_loop_bits = 0; backwards_jumps = []
-    arities = {1:2,2:3,3:2,4:1,5:0,6:3,7:3,8:3,9:3,10:3,11:3,12:2,13:2,14:2}
+    arities = {1:2,2:3,3:2,4:1,5:0,6:1,7:0,
+               8:3,9:3,10:3,11:3,12:3,13:3,14:2,15:2,16:2}
 
     while stream.tell() < ge:
         pos = stream.tell()
@@ -334,15 +368,21 @@ def predict_ram(data):
                 body = pos - target; max_loop_bits = max(max_loop_bits, body)
                 backwards_jumps.append(body)
 
-    slot_ram = 256 * 8; rules_ram = 15 * 64
-    loop_ram = max_loop_bits // 8 + 1; misc_ram = 256
+    slot_ram  = 512 * 4   # matches StreamExec.MAX_SLOTS * int32
+    rules_ram = 20 * 64
+    loop_ram  = max_loop_bits // 8 + 1
+    misc_ram  = 256
     total = slot_ram + rules_ram + loop_ram + misc_ram
     return {
-        'predicted_bytes': total, 'predicted_kb': round(total/1024, 2),
-        'max_loop_bits': max_loop_bits, 'max_loop_bytes': max_loop_bits // 8,
+        'predicted_bytes': total,
+        'predicted_kb':    round(total / 1024, 2),
+        'max_loop_bits':   max_loop_bits,
+        'max_loop_bytes':  max_loop_bits // 8,
         'backwards_jumps': len(backwards_jumps),
-        'breakdown': {'slots': slot_ram, 'rules': rules_ram,
-                      'loops': loop_ram, 'misc': misc_ram}
+        'breakdown': {
+            'slots': slot_ram, 'rules': rules_ram,
+            'loops': loop_ram, 'misc':  misc_ram,
+        }
     }
 
 
