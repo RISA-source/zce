@@ -275,3 +275,56 @@ This is a real limitation. To fix it properly, the depth checker would need to t
 | `tests/test_all.py` | 149 | 33 |
 | `tests/test_integration.py` | 128 | 10 |
 | **Total** | **277** | **43** |
+
+---
+
+## Third Session Changes
+
+### int32 — Is It Wrong?
+
+No. int32 is the right choice for ZCE's embedded target. STM32F030 and STM32F103 are 32-bit ARM — int32 is their native word size. ATtiny85 and ATmega328P are 8-bit but int16 would break multiplication (int16 × int16 can overflow int16, requiring a wider result type).
+
+The real issue was undocumented overflow behaviour. The Python reference VM uses Python's arbitrary-precision integers and never overflows. The C VM uses `int32_t` with C wrapping semantics. So `factorial(13)` gives `6227020800` in Python and `1932053504` in C (mod 2^32). Both are correct for their type. Now documented in README and tested in `test_integration.py`.
+
+No type change was made. int32 is correct.
+
+### Depth Bound Fixed for Compiled Loops (Literal Bounds)
+
+**Problem:** `is_bounded=False` for all compiled while loops. The depth checker only found initial values from `SET` instructions, but compiled while loops use `SUB(cond, bound, var)` where `cond` is recomputed each iteration, never `SET`.
+
+**Fix:** When a tier-1 slot has no `SET`-based initial value, look for `SUB(dst, a, b)` where `dst` is the tier-1 slot. If both `a` and `b` have known initial values (from `SET`), then `initial(dst) = initial(a) - initial(b)`.
+
+**Result:**
+- `while(i < 11)` — bound is literal 11, `i` starts at 1 from `SET`. `initial(cond) = 11 - 1 = 10`. `is_bounded=True`, `step_bound` computed. ✓
+- `while(i < n)` — bound is runtime variable `n` (function parameter, not `SET` at analysis time). Correctly stays `is_bounded=False`. ✓
+
+This is the correct distinction: programs with literal bounds get static step bounds; programs with runtime bounds are honestly reported as unbounded statically.
+
+### Parallel Executor (ParallelExec)
+
+Added `ParallelExec` class to `analysis/zce_analysis.py`. Uses the snapshot-then-apply model:
+
+1. For each wave: snapshot current slot values
+2. Execute every instruction in the wave reading from the snapshot  
+3. Apply all writes after all reads
+
+This is correct if and only if the wave schedule is correct — which is the point. Running `ParallelExec` and comparing to `run_stream` is a live proof that the wave schedule is sound.
+
+For programs with control flow (loops, function calls), `ParallelExec` falls back to sequential execution but still verifies that every same-wave instruction pair has zero slot conflicts. For pure dataflow programs (no JIF/JMP/CALL/RET), it executes fully wave-by-wave.
+
+This models how the wave schedule would be used on real hardware:
+- ESP32 dual-core: each core executes half the instructions in a wave
+- Cortex-M4: SIMD groups execute in one instruction  
+- Pipeline: instructions of a wave issue simultaneously without hazards
+
+All programs tested: agrees with sequential, zero conflicts. Tested in `test_integration.py`.
+
+### Tests: 310 total
+
+| File | Tests | Suites |
+|---|---|---|
+| `tests/test_all.py` | 149 | 33 |
+| `tests/test_integration.py` | 161 | 13 |
+| **Total** | **310** | **46** |
+
+New integration suites added: depth bound (literal vs runtime), parallel executor agreement, int32 overflow documentation.

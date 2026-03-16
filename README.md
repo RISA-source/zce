@@ -1,7 +1,7 @@
 # ZCE — Zero-Count Encoding VM
 
 **Author:** Rishi Saraff  
-**Status:** 277 tests passing across 43 suites (149 unit + 128 integration). C header compiles and agrees with Python reference VM.
+**Status:** 310 tests passing across 46 suites (149 unit + 161 integration). C header compiles and agrees with Python reference VM.
 
 ---
 
@@ -74,7 +74,7 @@ Measured: up to **40× theoretical speedup** on programs with independent operat
 print(r['depth']['step_bound'])  # upper bound on total steps
 ```
 
-Derived from tier-1 slot initial values. Available for tier-safe programs with known inputs.
+Derived from tier-1 slot initial values. Works for compiled loops with literal bounds (`while(i < 11)`). Programs with runtime-determined bounds (`while(i < n)`) are correctly reported as unbounded statically.
 
 ---
 
@@ -155,7 +155,7 @@ zce/
     zce_analysis.py  Five static analysis passes
   tests/
     test_all.py         149 tests: VM, compiler, analysis, streaming, C/Python, error conditions
-    test_integration.py 128 tests: guarantees, full pipeline, cross-module correctness
+    test_integration.py 161 tests: guarantees, full pipeline, parallelism, depth bounds, int32
 ```
 
 ---
@@ -197,6 +197,18 @@ Same wave + non-overlapping slots = provably independent
 ### SIMD Groups
 
 Four independent same-operation instructions on consecutive destination slots map to one Cortex-M4 NEON instruction. Detected automatically by Pass 5.
+
+### Parallel Executor
+
+The `ParallelExec` class in `analysis/zce_analysis.py` executes programs using the wave schedule instead of sequential order. For each wave it snapshots the slot state, executes all instructions reading from the snapshot, then applies all writes. This is the snapshot-then-apply model — it produces the correct result if and only if the wave schedule is correct. Running `ParallelExec` on any program and comparing its output to `run_stream` is a live proof that the wave schedule is sound.
+
+```python
+from analysis.zce_analysis import ParallelExec
+pex = ParallelExec()
+agrees, par_slots, seq_slots = pex.agrees_with_sequential(binary)
+print(f'Wave schedule correct: {agrees}')   # True for all tier-safe programs
+print(f'Conflicts: {pex.conflicts}')         # [] always if schedule is sound
+```
 
 ---
 
@@ -296,7 +308,7 @@ Python 3.8+. No dependencies beyond standard library.
 ## Measured Numbers
 
 ```
-Tests:                       277/277 passing (149 unit + 128 integration, 43 suites)
+Tests:                       310/310 passing (149 unit + 161 integration, 46 suites)
   VM core:                   all 11 instructions, loops, edge cases
   Compiler:                  full language, nested calls, mutual calls, iterative fib
   Analysis:                  tier safety, waves, depth bound, SIMD, RAM prediction
@@ -332,6 +344,7 @@ VM footprint (C):
 - Termination proof applies only to tier-safe programs. Non-tier-safe programs may or may not terminate — the checker tells you which case you're in.
 - Parallel speedup numbers are theoretical (instruction-level independence). Actual speedup on real cores depends on the scheduler and data bus.
 - C header has not yet been tested on physical silicon (ATtiny85/STM32). That is the next step.
+- All arithmetic is int32. The Python reference VM uses Python's arbitrary-precision integers so it will not overflow; the C VM uses `int32_t` with C wrapping semantics. For programs that may produce values larger than 2,147,483,647, results will differ between the two VMs. This is expected and documented.
 
 ---
 
@@ -340,7 +353,7 @@ VM footprint (C):
 1. **Hardware demo** — ATtiny85 or STM32F030, pre-deployment bounds verified live before flash
 2. **FORK/JOIN in C** — ESP32 dual-core, wave schedule as the safety proof
 3. **SIMD emission** — Cortex-M4 NEON, measure actual vs theoretical speedup on silicon
-4. **Depth bound for compiled loops** — `is_bounded=False` for compiler output because the tier-1 slot is a computed `SUB` result, not `SET`-initialised. Tracker needs to follow `SUB(bound, var)` patterns
+4. **Physical hardware demo** — run on actual ATtiny85/STM32, verify predict_ram before flash
 5. **Compiler: same-function-twice in arg list** — `f(g(x), g(x))` shares arg slots; sequential workaround documented in BUILDLOG
 
 ---

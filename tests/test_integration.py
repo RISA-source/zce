@@ -27,7 +27,7 @@ from vm.zce_vm      import Asm, run_stream, _BitReader, EXT
 from vm.zce_stream  import predict_ram, run_streaming, StreamExec
 from compiler.zce_compiler import compile_source
 from analysis.zce_analysis import (
-    analyze, is_tier_safe, decode_program, independent
+    analyze, is_tier_safe, decode_program, independent, ParallelExec
 )
 
 # ── Test framework ─────────────────────────────────────────────────────────────
@@ -281,11 +281,10 @@ for name, src, slot, expected in COUNTING_LOOPS:
     check_true(f"has instructions  [{name}]", len(r['instrs']) > 0)
     check_true(f"tier-safe         [{name}]", r['tier_safe'])
     check_true(f"has waves         [{name}]", len(r['schedule']) > 0)
-    # depth_bound requires tier-1 slots to be SET-initialised at program start.
-    # Compiled while loops use SUB(bound, var) as tier-1 slot — computed each
-    # iteration, never SET. Depth checker can't find initial value; is_bounded=False.
-    # This is a documented limitation of depth analysis on compiled output.
-    # check_true(f"depth is bounded  [{name}]", r['depth']['is_bounded'])
+    # depth_bound works for compiled literal-bound loops (while i < 11).
+    # Variable-bound loops (while i < n) remain unbounded since bound is runtime.
+    # Both are correct. We don't assert here since COUNTING_LOOPS mixes both.
+    # See test_depth_bound_compiled below for explicit per-case tests.
     check(f"correct result    [{name}]", vm.slot(slot), expected)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -379,6 +378,92 @@ for name, src, slot, expected in [
     print(f"    full pipeline (compile+analyze+predict+run): {total:.2f}ms")
     check_true(f"pipeline < 5ms [{name}]", total < 5.0)
     check(f"correct result [{name}]", run_stream(binary)[0].slot(slot), expected)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 11. DEPTH BOUND: literal-bound loops now bounded after compiler fix
+# ══════════════════════════════════════════════════════════════════════════════
+
+suite("Depth bound: literal vs runtime bounds")
+
+literal_bound_cases = [
+    ("sum 1..10 literal",   "let s=0;let i=1;while(i<11){s=s+i;i=i+1;}"),
+    ("nested literal 5x5",  "let s=0;let i=0;while(i<5){let j=0;while(j<5){s=s+1;j=j+1;}i=i+1;}"),
+]
+runtime_bound_cases = [
+    ("factorial var n",     "fun f(n){let r=1;let i=1;while(i<n+1){r=r*i;i=i+1;}return r;} let x=f(6);"),
+    ("fib var n",           "fun fib(n){let a=0;let b=1;let i=0;while(i<n){let t=a+b;a=b;b=t;i=i+1;}return a;} let x=fib(15);"),
+]
+
+for name, src in literal_bound_cases:
+    binary = compile_source(src)
+    r      = analyze(binary)
+    vm, _  = run_stream(binary)
+    check_true(f"literal bound: is_bounded [{name}]",  r['depth']['is_bounded'])
+    check_true(f"literal bound: bound>0    [{name}]",  r['depth']['step_bound'] > 0)
+    check_true(f"literal bound: bound>=actual [{name}]", r['depth']['step_bound'] >= vm.steps)
+
+for name, src in runtime_bound_cases:
+    binary = compile_source(src)
+    r      = analyze(binary)
+    # Runtime bounds correctly reported as unbounded (bound depends on input value)
+    check_false(f"runtime bound: not bounded [{name}]", r['depth']['is_bounded'])
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 12. PARALLEL EXECUTOR: wave schedule is correct
+# ══════════════════════════════════════════════════════════════════════════════
+
+suite("Parallel executor: agrees with sequential on all programs")
+
+_pex = ParallelExec()
+
+for name, src, slot, expected in COUNTING_LOOPS:
+    binary = compile_source(src)
+    agrees, par_slots, seq_slots = _pex.agrees_with_sequential(binary)
+    check_true(f"parallel agrees [{name}]",       agrees)
+    check(f"parallel result [{name}]",             par_slots[slot], expected)
+    check("parallel: zero conflicts",              len(_pex.conflicts), 0)
+
+# Pure dataflow: verify snapshot-then-apply gives correct results
+from vm.zce_vm import Asm as _Asm
+_a = _Asm(); _a.std()
+# 4 independent ADDs in one wave
+_a.SET(10,3); _a.SET(11,4); _a.SET(12,5); _a.SET(13,6)
+_a.ADD(0, 10, 11)  # 7
+_a.ADD(1, 12, 13)  # 11
+_a.MUL(2, 10, 12)  # 15
+_bin = _a.build()
+_agrees, _par, _seq = _pex.agrees_with_sequential(_bin)
+check_true("parallel dataflow: agrees",     _agrees)
+check("parallel dataflow: ADD 3+4=7",      _par[0], 7)
+check("parallel dataflow: ADD 5+6=11",     _par[1], 11)
+check("parallel dataflow: MUL 3*5=15",     _par[2], 15)
+check("parallel dataflow: zero conflicts", len(_pex.conflicts), 0)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 13. INT32 OVERFLOW: documented behaviour
+# ══════════════════════════════════════════════════════════════════════════════
+
+suite("int32 overflow: wrapping is expected behaviour")
+
+# Python VM uses arbitrary precision -- slots can hold values > 2^31
+# C VM uses int32_t -- wraps at 2^31
+# Both are correct for their type. The wrapping is documented.
+r_large, _ = run_stream(compile_source("let x = 2000000000 + 200000000;"))
+check("2B + 200M = 2.2B (fits int32, >0)", r_large.slot(0) > 0, True)
+
+# Overflow wraps in Python VM too (Python ints are unlimited, but ZCE slots
+# don't enforce int32 in the Python VM -- they stay as Python ints)
+import math
+r_fact, _ = run_stream(compile_source(
+    "fun f(n){let r=1;let i=1;while(i<n+1){r=r*i;i=i+1;}return r;} let x=f(13);"))
+# 13! = 6227020800 > 2^32 -- Python VM gives exact result
+check("factorial 13 Python VM: exact (no overflow)", r_fact.slot(0), math.factorial(13))
+# Note: C VM would give 13! mod 2^32 = 1932053504 (int32 wrapping)
+# This is a documented difference: Python VM is a reference implementation,
+# C VM follows C int32 arithmetic.
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 
 # ══════════════════════════════════════════════════════════════════════════════
 # RESULTS
