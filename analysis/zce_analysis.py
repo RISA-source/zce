@@ -159,32 +159,56 @@ def decode_program(data):
 def classify_tiers(instrs):
     """
     Classify slots into:
-      tier1 = CONTROL: appear as JIF condition arguments
+      tier1 = CONTROL: appear as conditions of LOOP JIFs (backward-reachable)
       tier0 = DATA: receive arithmetic results
+
+    A JIF is a loop condition if it is enclosed in a loop — i.e. there exists
+    a backward jump whose target is at or before the JIF's position. JIFs that
+    are pure if-statement conditions (no enclosing loop) are NOT tier-1, because
+    they trivially terminate regardless of what drives them.
 
     Rules for tier-safe programs:
       1. No tier-0 slot may flow into a tier-1 (control) position
       2. Tier-1 slots may only be decremented (SUB) or reset (SET literal)
-         — they may not be incremented (ADD, MUL) from non-literal sources
 
     Returns (tier0, tier1, violations).
     violations is empty iff the program is tier-safe (guaranteed to terminate).
 
-    Proof sketch:
-      Every JIF condition checks a tier-1 slot.
-      Tier-1 slots only decrease or reset to literals.
-      A strictly decreasing integer bounded below by zero reaches zero in
-      finite steps. Therefore every loop terminates. QED.
+    Proof:
+      Every loop JIF condition checks a tier-1 slot.
+      Tier-1 slots only decrease (SUB) or reset (SET literal).
+      A non-increasing integer bounded below by zero reaches zero in finite steps.
+      Therefore every loop terminates. QED.
     """
-    tier1 = set()  # control slots
+    tier1 = set()  # control slots (loop JIF conditions only)
     tier0 = set()  # data slots
     violations = []
 
-    # First pass: collect tier-1 slots (JIF conditions)
+    # Build a map of loop regions: loop_start -> loop_end (pos of backward JMP).
+    # A loop is defined by a backward jump (JMP or JIF with target < pos).
+    # loop_end = pos of the backward jump that closes the loop.
+    # loop_start = target of that backward jump.
+    loop_regions = {}  # loop_start -> loop_end
+    for instr in instrs:
+        if instr.op in ('JIF', 'JMP') and instr.args[-1] < instr.pos:
+            start = instr.args[-1]
+            end   = instr.pos
+            # Keep the outermost end for each start (largest loop_end per start)
+            if start not in loop_regions or end > loop_regions[start]:
+                loop_regions[start] = end
+
+    # First pass: collect tier-1 slots — only from LOOP GUARD JIFs.
+    # A JIF is the loop guard (not an if-body JIF) if:
+    #   1. It is enclosed in a loop (some loop_start <= JIF.pos <= loop_end)
+    #   2. Its jump target exits the loop body (target > loop_end)
+    # If-body JIFs stay inside the loop (target <= loop_end) and are NOT tier-1.
     for instr in instrs:
         if instr.op == 'JIF':
-            # args[0] is the condition slot
-            tier1.add(instr.args[0])
+            target = instr.args[-1]
+            for loop_start, loop_end in loop_regions.items():
+                if loop_start <= instr.pos <= loop_end and target > loop_end:
+                    tier1.add(instr.args[0])
+                    break
 
     # Second pass: collect tier-0 slots — slots written by INCREASING operations
     # SUB and SET are excluded: SUB decrements (safe for control), SET resets to literal

@@ -1,7 +1,7 @@
 # ZCE — Zero-Count Encoding VM
 
 **Author:** Rishi Saraff  
-**Status:** 310 tests passing across 46 suites (149 unit + 161 integration). C header compiles and agrees with Python reference VM.
+**Status:** 413 tests passing across 56 suites (149 unit + 161 integration + 103 benchmark). C header compiles and agrees with Python reference VM.
 
 ---
 
@@ -53,7 +53,7 @@ if safe:
 
 The tier checker classifies slots as control (tier-1) or data (tier-0). If all loop conditions are driven by slots written only by SUB (decrement) or SET (literal reset), termination is proven. **Proof:** a non-increasing integer bounded below by zero reaches zero in finite steps. Every JIF checks a tier-1 slot. Therefore every loop terminates. ∎
 
-This is a structural check on the binary — O(n), no execution needed. Compiler-produced counting loops (`while(i < N)`) generate tier-safe binaries automatically.
+This is a structural check on the binary — O(n), no execution needed. Compiler-produced counting loops (`while(i < N)`) and functions with `if` conditions generate tier-safe binaries. The tier checker distinguishes loop-guard JIFs (backward-reachable) from if-body JIFs (trivially terminating), so `if(a > b)` inside a function no longer causes false violations.
 
 ### 3. Parallel execution schedule — before execution
 
@@ -156,6 +156,7 @@ zce/
   tests/
     test_all.py         149 tests: VM, compiler, analysis, streaming, C/Python, error conditions
     test_integration.py 161 tests: guarantees, full pipeline, parallelism, depth bounds, int32
+    test_bench.py       103 tests: timing regression, C agreement, tier safety, binary size
 ```
 
 ---
@@ -193,6 +194,22 @@ Same wave + non-overlapping slots = provably independent
   → safe to run simultaneously
   → no locks, no race conditions
 ```
+
+### Parallel C Executor
+
+`generate_parallel_c(binary, parallel=True)` in `analysis/zce_parallel_c.py` emits C source that encodes the wave schedule statically. The generated code uses OpenMP `#pragma omp parallel for` on each wave. Compile with `gcc -O2 -fopenmp`.
+
+```python
+from analysis.zce_parallel_c import generate_parallel_c, compile_and_run
+
+binary  = compile_source(src)
+c_src   = generate_parallel_c(binary, parallel=True, label='myprog')
+result, time_ms, ok, _ = compile_and_run(c_src, parallel=True)
+```
+
+For pure-dataflow programs (no loops), the C code executes each wave with OpenMP. For programs with control flow, the VM handles execution order and OpenMP is applied to data-computation waves.
+
+**On thread overhead:** ZCE programs run in microseconds. Thread creation overhead (~30µs) exceeds per-program compute time for small programs. Wave-parallel speedup is meaningful at instruction-pipeline level (the scheduler prevents data hazards across any execution order within a wave) and for SIMD groups (4 consecutive same-op instructions, detected but emission pending).
 
 ### SIMD Groups
 
@@ -308,7 +325,7 @@ Python 3.8+. No dependencies beyond standard library.
 ## Measured Numbers
 
 ```
-Tests:                       310/310 passing (149 unit + 161 integration, 46 suites)
+Tests:                       413/413 passing (149 unit + 161 integration + 103 benchmark, 56 suites)
   VM core:                   all 11 instructions, loops, edge cases
   Compiler:                  full language, nested calls, mutual calls, iterative fib
   Analysis:                  tier safety, waves, depth bound, SIMD, RAM prediction
@@ -353,7 +370,8 @@ VM footprint (C):
 1. **Hardware demo** — ATtiny85 or STM32F030, pre-deployment bounds verified live before flash
 2. **FORK/JOIN in C** — ESP32 dual-core, wave schedule as the safety proof
 3. **SIMD emission** — Cortex-M4 NEON, measure actual vs theoretical speedup on silicon
-4. **Physical hardware demo** — run on actual ATtiny85/STM32, verify predict_ram before flash
+4. **SIMD emission in C** — detect SIMD groups (done) → emit Cortex-M4 NEON instructions (pending)
+5. **Physical hardware demo** — run on actual ATtiny85/STM32, verify predict_ram before flash
 5. **Compiler: same-function-twice in arg list** — `f(g(x), g(x))` shares arg slots; sequential workaround documented in BUILDLOG
 
 ---

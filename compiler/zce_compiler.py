@@ -469,10 +469,27 @@ class Compiler:
         lbl, params, _ = self.funs[node.name]
         if len(node.args) != len(params):
             raise TypeError(f'{node.name}: expected {len(params)} args, got {len(node.args)}')
-        # Evaluate args into slots 240+
-        for i, arg in enumerate(node.args):
-            self.emit_expr_into(arg, 240 + i)
-        self.asm.CALL(lbl)
+        # Evaluate each argument into a fresh tmp slot first, THEN copy to
+        # arg slots 240+. This prevents clobbering when a previous arg's
+        # result was placed in an arg slot (e.g. add(double(3), double(4))
+        # where double returns into slot 240 which is also the arg slot).
+        if len(node.args) == 0:
+            self.asm.CALL(lbl)
+        elif len(node.args) == 1:
+            # Single arg: evaluate directly into 240 (no clobbering possible)
+            self.emit_expr_into(node.args[0], 240)
+            self.asm.CALL(lbl)
+        else:
+            # Multiple args: evaluate into fresh tmps, then copy to arg slots
+            tmp_slots = [self.alloc_tmp() for _ in node.args]
+            for i, arg in enumerate(node.args):
+                self.emit_expr_into(arg, tmp_slots[i])
+            for i, tmp in enumerate(tmp_slots):
+                if tmp != 240 + i:
+                    self.asm.ADD(240 + i, tmp, self._zero)
+            for tmp in tmp_slots:
+                self.free_tmp(tmp)
+            self.asm.CALL(lbl)
         # Copy return value to dst
         self.asm.ADD(dst_slot, self._ret_val, self._zero)
 
