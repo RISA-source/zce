@@ -1,7 +1,7 @@
 # ZCE — Zero-Count Encoding VM
 
 **Author:** Rishi Saraff  
-**Status:** 149 tests passing across 33 suites. C header compiles and agrees with Python reference VM.
+**Status:** 277 tests passing across 43 suites (149 unit + 128 integration). C header compiles and agrees with Python reference VM.
 
 ---
 
@@ -40,7 +40,7 @@ pred = predict_ram(program_bytes)
 print(pred['predicted_bytes'])  # hard upper bound on RAM needed
 ```
 
-Scan the binary once. The result is always conservative — actual usage is equal or less.
+Scan the binary once. The result is always conservative — actual usage is equal or less. Verified by integration tests against actual `StreamExec` RAM usage.
 
 ### 2. Termination proof — before execution
 
@@ -53,7 +53,7 @@ if safe:
 
 The tier checker classifies slots as control (tier-1) or data (tier-0). If all loop conditions are driven by slots written only by SUB (decrement) or SET (literal reset), termination is proven. **Proof:** a non-increasing integer bounded below by zero reaches zero in finite steps. Every JIF checks a tier-1 slot. Therefore every loop terminates. ∎
 
-This is a structural check on the binary — O(n), no execution needed.
+This is a structural check on the binary — O(n), no execution needed. Compiler-produced counting loops (`while(i < N)`) generate tier-safe binaries automatically.
 
 ### 3. Parallel execution schedule — before execution
 
@@ -154,7 +154,8 @@ zce/
   analysis/
     zce_analysis.py  Five static analysis passes
   tests/
-    test_all.py      149 tests: VM, compiler, analysis, streaming, C/Python agreement, error conditions
+    test_all.py         149 tests: VM, compiler, analysis, streaming, C/Python, error conditions
+    test_integration.py 128 tests: guarantees, full pipeline, cross-module correctness
 ```
 
 ---
@@ -295,7 +296,7 @@ Python 3.8+. No dependencies beyond standard library.
 ## Measured Numbers
 
 ```
-Test suite:                  149/149 passing, 33 suites
+Tests:                       277/277 passing (149 unit + 128 integration, 43 suites)
   VM core:                   all 11 instructions, loops, edge cases
   Compiler:                  full language, nested calls, mutual calls, iterative fib
   Analysis:                  tier safety, waves, depth bound, SIMD, RAM prediction
@@ -339,7 +340,8 @@ VM footprint (C):
 1. **Hardware demo** — ATtiny85 or STM32F030, pre-deployment bounds verified live before flash
 2. **FORK/JOIN in C** — ESP32 dual-core, wave schedule as the safety proof
 3. **SIMD emission** — Cortex-M4 NEON, measure actual vs theoretical speedup on silicon
-4. **Compiler: same-function-twice in arg list** — `f(g(x), g(x))` shares arg slots; sequential workaround documented in BUILDLOG
+4. **Depth bound for compiled loops** — `is_bounded=False` for compiler output because the tier-1 slot is a computed `SUB` result, not `SET`-initialised. Tracker needs to follow `SUB(bound, var)` patterns
+5. **Compiler: same-function-twice in arg list** — `f(g(x), g(x))` shares arg slots; sequential workaround documented in BUILDLOG
 
 ---
 

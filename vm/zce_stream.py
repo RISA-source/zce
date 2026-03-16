@@ -368,7 +368,7 @@ def predict_ram(data):
                 body = pos - target; max_loop_bits = max(max_loop_bits, body)
                 backwards_jumps.append(body)
 
-    slot_ram  = 512 * 4   # matches StreamExec.MAX_SLOTS * int32
+    slot_ram  = StreamExec.MAX_SLOTS * 4  # int32 per slot, stays correct if MAX_SLOTS changes
     rules_ram = 20 * 64
     loop_ram  = max_loop_bits // 8 + 1
     misc_ram  = 256

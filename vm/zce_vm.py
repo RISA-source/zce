@@ -90,6 +90,69 @@ def canonical_depth(tok_identity, nesting=0):
 
 # ── Executor ──────────────────────────────────────────────────────────────────
 
+# ── Shared bit reader ────────────────────────────────────────────────────────
+
+class _BitReader:
+    """
+    Shared bit-stream reader used by both Exec and decode_program.
+    Reads from raw bytes using inline bit arithmetic — no list allocation.
+    Tracks absolute bit position for use by the analyzer.
+    """
+    __slots__ = ('_data', '_nbits', 'pos')
+
+    def __init__(self, data):
+        self._data = bytes(data)
+        self._nbits = len(data) * 8
+        self.pos = 0
+
+    def bit(self):
+        if self.pos >= self._nbits:
+            return -1
+        b = (self._data[self.pos >> 3] >> (7 - (self.pos & 7))) & 1
+        self.pos += 1
+        return b
+
+    def peek(self):
+        if self.pos >= self._nbits:
+            return -1
+        return (self._data[self.pos >> 3] >> (7 - (self.pos & 7))) & 1
+
+    def elias(self):
+        """Decode one Elias-gamma integer. Returns -1 on error."""
+        k = 0
+        while self.peek() == 0:
+            self.bit(); k += 1
+            if k > 30: return -1
+        x = 0
+        for _ in range(k + 1):
+            b = self.bit()
+            if b < 0: return -1
+            x = (x << 1) | b
+        return x - 1
+
+    def token(self):
+        """Decode token, return (N, M). N=opcode identity, M=depth."""
+        n = 0
+        while self.peek() == 0: self.bit(); n += 1
+        m = 0
+        while self.peek() == 1: self.bit(); m += 1
+        self.bit()  # terminator
+        return n, m - 1
+
+
+# ── Bit-size math helpers ─────────────────────────────────────────────────────
+# These replace BS() instantiation in _isize() — algebraically identical,
+# no object allocation needed.
+
+def _elen(v):
+    """Elias-coded length of integer v, in bits."""
+    return 2 * (v + 1).bit_length() - 1
+
+def _tlen(ident, depth):
+    """Token length: N zeros + (M+1) ones + 1 terminator."""
+    return ident + depth + 2
+
+
 class Exec:
     """ZCE v2 executor — reads and stores M field for analysis."""
 
@@ -362,20 +425,19 @@ class Asm:
         return _NestingContext(self)
 
     def _isize(self, ins):
-        bs = BS()
         op = ins['op']
         depth = ins.get('depth', DEPTH_STATEMENT)
-        if op == 'SET': return bs.tlen(1, depth) + bs.elen(ins['d']) + bs.elen(ins['v'])
-        if op == 'ADD': return bs.tlen(2, depth) + bs.elen(ins['d']) + bs.elen(ins['a']) + bs.elen(ins['b'])
+        if op == 'SET': return _tlen(1, depth) + _elen(ins['d']) + _elen(ins['v'])
+        if op == 'ADD': return _tlen(2, depth) + _elen(ins['d']) + _elen(ins['a']) + _elen(ins['b'])
         if op == 'EXT':
-            s = bs.tlen(ins['tok'], depth) + bs.elen(ins['d'])
-            if ins['a'] is not None: s += bs.elen(ins['a'])
-            if ins['b'] is not None: s += bs.elen(ins['b'])
+            s = _tlen(ins['tok'], depth) + _elen(ins['d'])
+            if ins['a'] is not None: s += _elen(ins['a'])
+            if ins['b'] is not None: s += _elen(ins['b'])
             return s
-        if op == 'JIF':  return bs.tlen(3, depth) + bs.elen(ins['cond']) + bs.elen(ins['off'])
-        if op == 'JMP':  return bs.tlen(4, depth) + bs.elen(ins['off'])
-        if op == 'CALL': return bs.tlen(6, depth) + bs.elen(ins['off'])
-        if op == 'RET':  return bs.tlen(7, depth)
+        if op == 'JIF':  return _tlen(3, depth) + _elen(ins['cond']) + _elen(ins['off'])
+        if op == 'JMP':  return _tlen(4, depth) + _elen(ins['off'])
+        if op == 'CALL': return _tlen(6, depth) + _elen(ins['off'])
+        if op == 'RET':  return _tlen(7, depth)
         return 0
 
     def build(self):
@@ -481,8 +543,3 @@ def stream_to_bits(stream):
     for byte in stream:
         for s in range(7, -1, -1): bits.append((byte >> s) & 1)
     return bits
-
-
-def consts(a):
-    """Emit slot constants 0-3."""
-    a.SET(1, 0); a.SET(2, 1); a.SET(3, 2); a.SET(4, 3)

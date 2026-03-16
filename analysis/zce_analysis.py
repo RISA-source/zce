@@ -13,7 +13,7 @@ All passes are O(n) or O(n²) in program length.
 None require execution. All results are exact, not approximate.
 """
 
-from vm.zce_vm import BS, Exec, Asm, AsmOpt, EXT, run_stream, TOK, OP
+from vm.zce_vm import BS, Exec, Asm, AsmOpt, EXT, run_stream, TOK, OP, _BitReader
 # Note: in v2, AsmOpt = Asm (alias). Extended ops now at tok8-16 (shifted +2 for CALL/RET).
 
 
@@ -47,36 +47,14 @@ def decode_program(data):
     Returns (instructions, rules, error_or_None).
     Mirrors Exec.run() but records structure instead of executing.
     """
-    bits = []
-    for b in data:
-        for s in range(7, -1, -1):
-            bits.append((b >> s) & 1)
+    br = _BitReader(data)
 
-    pos = [0]
+    def bit():   return br.bit()
+    def peek():  return br.peek()
+    def elias(): return br.elias()
+    def token(): return br.token()
 
-    def bit():
-        if pos[0] >= len(bits): return 0
-        v = bits[pos[0]]; pos[0] += 1; return v
-
-    def peek():
-        return bits[pos[0]] if pos[0] < len(bits) else -1
-
-    def elias():
-        k = 0
-        while peek() == 0:
-            bit(); k += 1
-            if k > 30: return -1
-        x = 0
-        for _ in range(k + 1): x = (x << 1) | bit()
-        return x - 1
-
-    def token():
-        n = 0
-        while peek() == 0: bit(); n += 1
-        m = 0
-        while peek() == 1: bit(); m += 1
-        bit()  # terminator
-        return n, m
+    # pos is now br.pos (absolute bit position)
 
     P, V = 0, 1
     rules = {
@@ -97,15 +75,15 @@ def decode_program(data):
     prog_bits = elias()
     if prog_bits < 0:
         return [], rules, "bad header"
-    gs = pos[0]
-    ge = pos[0] + prog_bits
+    gs = br.pos
+    ge = br.pos + prog_bits
 
     instrs = []
 
-    while pos[0] < ge:
-        ipos = pos[0]
+    while br.pos < ge:
+        ipos = br.pos
         tok, depth = token()
-        if pos[0] > ge: break
+        if br.pos > ge: break
         if tok == 0: continue
 
         # DEF instruction — update rules, record but don't add to instr list
