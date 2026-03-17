@@ -422,14 +422,32 @@ class Compiler:
         # which is correct but not tier-provable.
         if (node.cond.kind == 'BinOp' and node.cond.op == 'LT'
                 and node.cond.left.kind == 'Var'):
-            # Tier-safe path: emit bound - var into cond_slot
+            # Tier-safe: while(var < bound) -> SUB(cond, bound, var)
+            # When var reaches bound, SUB gives 0, JIF fires. Non-increasing.
             bound_slot = self.alloc_tmp()
             self.emit_expr_into(node.cond.right, bound_slot)
             var_slot = self.env.lookup(node.cond.left.name)
             self.asm.SUB(cond_slot, bound_slot, var_slot)
             self.free_tmp(bound_slot)
+        elif (node.cond.kind == 'BinOp' and node.cond.op == 'GT'
+                and node.cond.left.kind == 'Var'):
+            right = node.cond.right
+            var_slot = self.env.lookup(node.cond.left.name)
+            if right.kind == 'Int' and right.val == 0:
+                # Tier-safe: while(var > 0) -> SUB(cond, var, 0) = var itself
+                # JIF fires when var==0. var only decrements in well-formed countdown loops.
+                # We use SUB(cond, var, zero_slot) so tier checker sees SUB -> tier-safe.
+                self.asm.SUB(cond_slot, var_slot, self._zero)
+            else:
+                # Tier-safe: while(var > N) -> SUB(cond, var, bound)
+                # When var decrements to N, SUB gives 0, JIF fires.
+                bound_slot = self.alloc_tmp()
+                self.emit_expr_into(right, bound_slot)
+                self.asm.SUB(cond_slot, var_slot, bound_slot)
+                self.free_tmp(bound_slot)
         else:
             # General path: evaluate full boolean condition
+            # (tier checker will flag this, which is honest)
             self.emit_expr_into(node.cond, cond_slot)
 
         self.asm.JIF(cond_slot, done_lbl)

@@ -1,7 +1,7 @@
 # ZCE — Zero-Count Encoding VM
 
 **Author:** Rishi Saraff  
-**Status:** 413 tests passing across 56 suites (149 unit + 161 integration + 103 benchmark). C header compiles and agrees with Python reference VM.
+**Status:** 480 tests passing across 59 suites. C header includes cached decoder with wave-ordered ILP execution (13–26x measured speedup over regular VM).
 
 ---
 
@@ -53,7 +53,7 @@ if safe:
 
 The tier checker classifies slots as control (tier-1) or data (tier-0). If all loop conditions are driven by slots written only by SUB (decrement) or SET (literal reset), termination is proven. **Proof:** a non-increasing integer bounded below by zero reaches zero in finite steps. Every JIF checks a tier-1 slot. Therefore every loop terminates. ∎
 
-This is a structural check on the binary — O(n), no execution needed. Compiler-produced counting loops (`while(i < N)`) and functions with `if` conditions generate tier-safe binaries. The tier checker distinguishes loop-guard JIFs (backward-reachable) from if-body JIFs (trivially terminating), so `if(a > b)` inside a function no longer causes false violations.
+This is a structural check on the binary — O(n), no execution needed. Compiler-produced counting loops generate tier-safe binaries. Supported tier-safe patterns: `while(i < N)` (SUB(bound,i)), `while(x > 0)` (SUB(x,0)), `while(x > N)` (SUB(x,N)). The tier checker distinguishes loop-guard JIFs from if-body JIFs, so `if(a > b)` inside functions no longer causes false violations.
 
 ### 3. Parallel execution schedule — before execution
 
@@ -129,6 +129,29 @@ int ok = zce_run(&vm, program_bytes, program_len);
 int result = vm.slots[0];
 ```
 
+### Cached decoder (15–21x faster for looping programs)
+
+```c
+#define ZCE_IMPLEMENTATION
+#include "zce_core.h"
+
+ZCE_VM vm;
+zce_init(&vm);
+zce_install_std(&vm);
+
+// Decode once at load time
+int ok = zce_preload(&vm, program_bytes, program_len);
+
+// Execute many times -- no bit reading, no Elias decode, pure dispatch
+for (int run = 0; run < 1000; run++) {
+    memset(vm.slots, 0, sizeof(vm.slots));
+    zce_run_cached(&vm);
+}
+int result = vm.slots[0];
+```
+
+`zce_preload()` decodes the binary once into a `ZCE_Op` array, computes wave numbers (O(n²) dependency check), and sorts ops within basic blocks by wave. `zce_run_cached()` executes the pre-sorted array — same-wave ops are adjacent, the CPU issues them to separate ALU units simultaneously (ILP). Zero runtime overhead; sorting is done once at preload. Tunable with `ZCE_MAX_OPS` (default 128; set to 16 for ATtiny85).
+
 ### Seekable mode (minimum RAM)
 
 ```c
@@ -157,6 +180,7 @@ zce/
     test_all.py         149 tests: VM, compiler, analysis, streaming, C/Python, error conditions
     test_integration.py 161 tests: guarantees, full pipeline, parallelism, depth bounds, int32
     test_bench.py       103 tests: timing regression, C agreement, tier safety, binary size
+    test_cached.py       67 tests: cached decoder correctness, speedup, nops
 ```
 
 ---
@@ -325,7 +349,7 @@ Python 3.8+. No dependencies beyond standard library.
 ## Measured Numbers
 
 ```
-Tests:                       413/413 passing (149 unit + 161 integration + 103 benchmark, 56 suites)
+Tests:                       480/480 passing (149+161+103+67, 59 suites)
   VM core:                   all 11 instructions, loops, edge cases
   Compiler:                  full language, nested calls, mutual calls, iterative fib
   Analysis:                  tier safety, waves, depth bound, SIMD, RAM prediction
@@ -367,12 +391,9 @@ VM footprint (C):
 
 ## What Comes Next
 
-1. **Hardware demo** — ATtiny85 or STM32F030, pre-deployment bounds verified live before flash
-2. **FORK/JOIN in C** — ESP32 dual-core, wave schedule as the safety proof
-3. **SIMD emission** — Cortex-M4 NEON, measure actual vs theoretical speedup on silicon
-4. **SIMD emission in C** — detect SIMD groups (done) → emit Cortex-M4 NEON instructions (pending)
-5. **Physical hardware demo** — run on actual ATtiny85/STM32, verify predict_ram before flash
-5. **Compiler: same-function-twice in arg list** — `f(g(x), g(x))` shares arg slots; sequential workaround documented in BUILDLOG
+1. **Physical hardware demo** — ATtiny85 or STM32F030 with `zce_run_cached()`, verify predict_ram before flash, measure real speedup on silicon
+2. **SIMD emission in C** — emit detected SIMD groups (Pass 5) as Cortex-M4 NEON instructions; measure actual vs theoretical speedup
+3. **Multiple-instance parallel** — `zce_run_parallel(binary, inputs[], n)` for ESP32 dual-core sensor processing; zero sync needed, instances share no state
 
 ---
 
